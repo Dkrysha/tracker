@@ -364,6 +364,8 @@ with tab_crm:
         "instagram", "phone", "last_contact", "notes",
     ]
     CRM_CONFIG = {
+        # Чисто визуальная нумерация: только для чтения, в БД не уходит.
+        "№": st.column_config.NumberColumn("№", disabled=True, width="small"),
         "name": st.column_config.TextColumn("Имя"),
         "relationship": st.column_config.SelectboxColumn(
             "Тип отношений", options=RELATIONSHIPS
@@ -381,13 +383,17 @@ with tab_crm:
         return "" if v is None or pd.isna(v) else str(v).strip()
 
     def date_cell(v) -> str | None:
-        """Ячейку даты — в ISO-строку или None."""
-        if v is None or pd.isna(v):
+        """Ячейку даты — в ISO-строку или None (учитывая строки из session_state)."""
+        if v is None:
+            return None
+        if isinstance(v, str):
+            return v[:10] or None
+        if pd.isna(v):
             return None
         return (v.date() if hasattr(v, "date") else v).isoformat()
 
     def row_fields(r) -> dict:
-        """Строка таблицы -> словарь полей для БД."""
+        """Строка таблицы (dict/Series) -> словарь полей для БД."""
         return {
             "name": text_cell(r["name"]),
             "relationship": text_cell(r["relationship"]) or RELATIONSHIPS[0],
@@ -405,11 +411,14 @@ with tab_crm:
             continue
         st.subheader(person)
 
-        # id уходит в индекс (скрыт), чтобы знать, какую строку обновлять/удалять.
+        # id остаётся колонкой (нужен, чтобы знать, какую строку трогать),
+        # но прячем его из таблицы через column_order. Индекс — обычный RangeIndex,
+        # поэтому позиции из session_state совпадают с позициями строк ниже.
         df = pd.DataFrame(
             [
                 {
                     "id": c["id"],
+                    "№": i,  # порядковый номер строки (своя нумерация на человека)
                     "name": c.get("name") or "",
                     "relationship": c.get("relationship") or RELATIONSHIPS[0],
                     "tags": c.get("tags") or "",
@@ -423,39 +432,39 @@ with tab_crm:
                     ),
                     "notes": c.get("notes") or "",
                 }
-                for c in person_contacts
+                for i, c in enumerate(person_contacts, start=1)
             ],
-            columns=["id"] + CRM_COLS,
-        ).set_index("id")
+            columns=["id", "№"] + CRM_COLS,
+        )
 
-        edited = st.data_editor(
+        editor_key = f"crm_editor_{person}"
+        st.data_editor(
             df,
-            num_rows="dynamic",
+            num_rows="dynamic",  # без этого строки нельзя удалять/добавлять
             hide_index=True,
+            column_order=["№"] + CRM_COLS,  # id есть в данных, но в таблице не показан
             column_config=CRM_CONFIG,
-            key=f"crm_editor_{person}",
+            key=editor_key,
         )
 
         if st.button("Сохранить изменения", key=f"crm_save_{person}"):
-            original = {c["id"]: c for c in person_contacts}
-            kept_ids = set()
-            for idx, r in edited.iterrows():
-                if pd.isna(idx):
-                    # Новая строка, добавленная прямо в таблице.
-                    fields = row_fields(r)
-                    if fields["name"]:
-                        add_crm_contact(client, person, fields)
-                    continue
-                cid = int(idx)
-                kept_ids.add(cid)
-                fields = row_fields(r)
-                # Обновляем только реально изменившиеся строки.
-                orig = original[cid]
-                if any(fields[k] != (orig.get(k) or ("" if k != "last_contact" else None))
-                       for k in fields):
-                    update_crm_contact(client, cid, fields)
-            # Удалённые строки — те, чьих id больше нет в таблице.
-            for cid in set(original) - kept_ids:
-                delete_crm_contact(client, cid)
+            state = st.session_state.get(editor_key, {})
+
+            # Удаления: deleted_rows — список позиций строк в исходном df.
+            for pos in state.get("deleted_rows", []):
+                delete_crm_contact(client, int(df.iloc[pos]["id"]))
+
+            # Правки: edited_rows — {позиция: {колонка: новое_значение}}.
+            for pos, changes in state.get("edited_rows", {}).items():
+                row = df.iloc[int(pos)].to_dict()
+                row.update(changes)
+                update_crm_contact(client, int(df.iloc[int(pos)]["id"]), row_fields(row))
+
+            # Добавления прямо в таблице: added_rows — список словарей.
+            for new_row in state.get("added_rows", []):
+                fields = row_fields({**{col: "" for col in CRM_COLS}, **new_row})
+                if fields["name"]:
+                    add_crm_contact(client, person, fields)
+
             st.success("Изменения сохранены")
             st.rerun()
