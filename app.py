@@ -21,6 +21,7 @@ from db import (
     get_stage_counts,
     get_weekly_contacts,
     get_weekly_day_logs,
+    set_contact_archived,
     set_day_log,
     update_contact,
     update_crm_contact,
@@ -49,6 +50,7 @@ require_password()
 SOURCES = ["улица", "соцсети", "сайт"]
 STAGES = ["контакт", "свидание", "закрытие"]
 RELATIONSHIPS = ["дружеские", "романтические", "знакомые", "другое"]
+ACTIVITY = ["низкая", "средняя", "высокая"]
 
 st.title("📈 Трекер прогресса")
 
@@ -130,67 +132,94 @@ with tab_cards:
 
     st.divider()
 
+    def render_card(contact: dict) -> None:
+        """Тело карточки внутри expander: стадия, журнал, архив, удаление."""
+        archived = bool(contact.get("archived"))
+        new_stage = st.selectbox(
+            "Стадия",
+            STAGES,
+            index=STAGES.index(contact["stage"]),
+            key=f"stage_{contact['id']}",
+        )
+        if st.button("Сохранить", key=f"save_{contact['id']}"):
+            # Сохраняем только стадию, журнал заметок не трогаем.
+            update_contact(
+                client, contact["id"], new_stage, contact.get("notes") or ""
+            )
+            st.success("Сохранено")
+            st.rerun()
+
+        # Журнал заметок: старые записи показываем как есть, не редактируем.
+        journal = contact.get("notes") or ""
+        if journal.strip():
+            st.text(journal)
+        else:
+            st.caption("Записей пока нет.")
+
+        entry = st.text_area("Новая запись", key=f"newnote_{contact['id']}")
+        if st.button("Добавить", key=f"addnote_{contact['id']}"):
+            if entry.strip():
+                line = f"— {date.today().isoformat()}: {entry.strip()}"
+                # Дописываем в начало, старые записи сохраняем.
+                updated = line + ("\n" + journal if journal else "")
+                update_contact(client, contact["id"], contact["stage"], updated)
+                st.rerun()
+            else:
+                st.warning("Запись не может быть пустой")
+
+        # Архив: одна кнопка переключает archived в обе стороны.
+        if archived:
+            if st.button("Вернуть из архива", key=f"unarch_{contact['id']}"):
+                set_contact_archived(client, contact["id"], False)
+                st.rerun()
+        else:
+            if st.button("В архив", key=f"arch_{contact['id']}"):
+                set_contact_archived(client, contact["id"], True)
+                st.rerun()
+
+        # Удаление в два шага: первая кнопка только открывает
+        # подтверждение (запоминаем id в session_state), удаляет — «Да».
+        if st.session_state.get("confirm_delete") == contact["id"]:
+            st.warning("Точно удалить?")
+            yes, cancel = st.columns(2)
+            if yes.button("Да", key=f"yes_{contact['id']}", use_container_width=True):
+                delete_contact(client, contact["id"])
+                st.session_state.pop("confirm_delete", None)
+                st.rerun()
+            if cancel.button("Отмена", key=f"cancel_{contact['id']}", use_container_width=True):
+                st.session_state.pop("confirm_delete", None)
+                st.rerun()
+        else:
+            if st.button("Удалить", key=f"del_{contact['id']}"):
+                st.session_state["confirm_delete"] = contact["id"]
+                st.rerun()
+
     # --- Список карточек, сгруппированный по людям (база общая на двоих) ---
     # get_contacts отдаёт новые сверху, поэтому внутри группы порядок уже верный.
     contacts = get_contacts(client)
-    if not contacts:
+    active = [c for c in contacts if not c.get("archived")]
+    archived = [c for c in contacts if c.get("archived")]
+
+    if not active:
         st.caption("Пока нет ни одной карточки.")
     for person in ["Danylo", "Pavlo"]:
-        person_contacts = [c for c in contacts if c["user_email"] == person]
+        person_contacts = [c for c in active if c["user_email"] == person]
         if not person_contacts:
             continue
         st.subheader(person)
         for contact in person_contacts:
             title = f"{contact['name']} — {contact['stage']} ({contact['source']})"
             with st.expander(title):
-                new_stage = st.selectbox(
-                    "Стадия",
-                    STAGES,
-                    index=STAGES.index(contact["stage"]),
-                    key=f"stage_{contact['id']}",
-                )
-                if st.button("Сохранить", key=f"save_{contact['id']}"):
-                    # Сохраняем только стадию, журнал заметок не трогаем.
-                    update_contact(
-                        client, contact["id"], new_stage, contact.get("notes") or ""
-                    )
-                    st.success("Сохранено")
-                    st.rerun()
+                render_card(contact)
 
-                # Журнал заметок: старые записи показываем как есть, не редактируем.
-                journal = contact.get("notes") or ""
-                if journal.strip():
-                    st.text(journal)
-                else:
-                    st.caption("Записей пока нет.")
-
-                entry = st.text_area("Новая запись", key=f"newnote_{contact['id']}")
-                if st.button("Добавить", key=f"addnote_{contact['id']}"):
-                    if entry.strip():
-                        line = f"— {date.today().isoformat()}: {entry.strip()}"
-                        # Дописываем в начало, старые записи сохраняем.
-                        updated = line + ("\n" + journal if journal else "")
-                        update_contact(client, contact["id"], contact["stage"], updated)
-                        st.rerun()
-                    else:
-                        st.warning("Запись не может быть пустой")
-
-                # Удаление в два шага: первая кнопка только открывает
-                # подтверждение (запоминаем id в session_state), удаляет — «Да».
-                if st.session_state.get("confirm_delete") == contact["id"]:
-                    st.warning("Точно удалить?")
-                    yes, cancel = st.columns(2)
-                    if yes.button("Да", key=f"yes_{contact['id']}", use_container_width=True):
-                        delete_contact(client, contact["id"])
-                        st.session_state.pop("confirm_delete", None)
-                        st.rerun()
-                    if cancel.button("Отмена", key=f"cancel_{contact['id']}", use_container_width=True):
-                        st.session_state.pop("confirm_delete", None)
-                        st.rerun()
-                else:
-                    if st.button("Удалить", key=f"del_{contact['id']}"):
-                        st.session_state["confirm_delete"] = contact["id"]
-                        st.rerun()
+    # --- Архив: свёрнутый раздел со всеми архивными карточками ---
+    if archived:
+        st.divider()
+        with st.expander(f"Архив ({len(archived)})"):
+            for contact in archived:
+                title = f"{contact['name']} — {contact['stage']} ({contact['source']})"
+                with st.expander(title):
+                    render_card(contact)
 
 with tab_stats:
     st.header("Статистика")
@@ -285,15 +314,40 @@ with tab_stats:
     # === 4. Сравнение с другом — компактно, в самом низу ===
     st.divider()
     st.subheader("Сравнение с другом")
-    cmp_cols = st.columns(2)
-    for col, person in zip(cmp_cols, ["Danylo", "Pavlo"]):
+
+    # Числа обоих людей (архивные карточки уже исключены в get_stage_counts).
+    people = {}
+    for person in ["Danylo", "Pavlo"]:
         t = get_day_totals(client, person)
         s = get_stage_counts(client, person)
+        people[person] = {
+            "approaches": t["approaches"],
+            "missed": t["seen"] - t["approaches"],
+            "contacts": s["contact"],
+            "closing": s["closing"],
+        }
+
+    cmp_cols = st.columns(2)
+    for col, person in zip(cmp_cols, ["Danylo", "Pavlo"]):
+        p = people[person]
         with col:
             st.markdown(f"**{person}**")
-            st.write(f"Подходы: {t['approaches']}")
-            st.write(f"Контакты: {s['contact']}")
-            st.write(f"Закрытия: {s['closing']}")
+            st.write(f"Подошёл: {p['approaches']}")
+            st.write(f"Упущено: {p['missed']}")
+            st.write(f"Контакты: {p['contacts']}")
+            st.write(f"Закрытия: {p['closing']}")
+
+    # Сводка с точки зрения выбранного в сайдбаре человека («ты») против друга.
+    friend = "Pavlo" if user_email == "Danylo" else "Danylo"
+    me, other = people[user_email], people[friend]
+
+    def vs(field: str) -> str:
+        """Разница «ты − друг» со знаком (+/−) для наглядности."""
+        diff = me[field] - other[field]
+        return f"ты +{diff}" if diff > 0 else (f"ты {diff}" if diff < 0 else "поровну")
+
+    st.caption(f"Ты ({user_email}) vs друг ({friend})")
+    st.write(f"Подходы: {vs('approaches')}  ·  Закрытия: {vs('closing')}")
 
 with tab_crm:
     st.header("База данных")
@@ -305,6 +359,7 @@ with tab_crm:
         crm_instagram = f1.text_input("Инстаграм")
         crm_phone = f2.text_input("Телефон")
         crm_rel = st.selectbox("Тип отношений", RELATIONSHIPS)
+        crm_activity = st.selectbox("Активность", ACTIVITY, index=1)
         crm_tags = st.text_input("Теги / интересы")
         crm_city = st.text_input("Город / район")
         crm_last = st.date_input("Дата последнего контакта", value=date.today())
@@ -320,6 +375,7 @@ with tab_crm:
                     "instagram": crm_instagram.strip(),
                     "phone": crm_phone.strip(),
                     "relationship": crm_rel,
+                    "activity": crm_activity,
                     "tags": crm_tags.strip(),
                     "city": crm_city.strip(),
                     "last_contact": crm_last.isoformat(),
@@ -336,11 +392,12 @@ with tab_crm:
     crm_contacts = get_crm_contacts(client)
 
     # --- Поиск и фильтры ---
-    s1, s2, s3 = st.columns(3)
+    s1, s2, s3, s4 = st.columns(4)
     query = s1.text_input("Поиск (имя / теги)").strip().lower()
     rel_filter = s2.selectbox("Тип отношений", ["все"] + RELATIONSHIPS)
+    activity_filter = s3.selectbox("Активность", ["все"] + ACTIVITY)
     cities = sorted({c.get("city") for c in crm_contacts if c.get("city")})
-    city_filter = s3.selectbox("Город", ["все"] + cities)
+    city_filter = s4.selectbox("Город", ["все"] + cities)
 
     def matches(c: dict) -> bool:
         if query and query not in (
@@ -348,6 +405,8 @@ with tab_crm:
         ):
             return False
         if rel_filter != "все" and c.get("relationship") != rel_filter:
+            return False
+        if activity_filter != "все" and c.get("activity") != activity_filter:
             return False
         if city_filter != "все" and c.get("city") != city_filter:
             return False
@@ -360,7 +419,7 @@ with tab_crm:
     # --- Таблицы-редакторы, сгруппированные по человеку ---
     # Колонки таблицы (порядок = порядок в data_editor).
     CRM_COLS = [
-        "name", "relationship", "tags", "city",
+        "name", "relationship", "activity", "tags", "city",
         "instagram", "phone", "last_contact", "notes",
     ]
     CRM_CONFIG = {
@@ -370,6 +429,7 @@ with tab_crm:
         "relationship": st.column_config.SelectboxColumn(
             "Тип отношений", options=RELATIONSHIPS
         ),
+        "activity": st.column_config.SelectboxColumn("Активность", options=ACTIVITY),
         "tags": st.column_config.TextColumn("Теги / интересы"),
         "city": st.column_config.TextColumn("Город / район"),
         "instagram": st.column_config.TextColumn("Инстаграм"),
@@ -397,6 +457,7 @@ with tab_crm:
         return {
             "name": text_cell(r["name"]),
             "relationship": text_cell(r["relationship"]) or RELATIONSHIPS[0],
+            "activity": text_cell(r["activity"]) or ACTIVITY[1],
             "tags": text_cell(r["tags"]),
             "city": text_cell(r["city"]),
             "instagram": text_cell(r["instagram"]),
@@ -421,6 +482,7 @@ with tab_crm:
                     "№": i,  # порядковый номер строки (своя нумерация на человека)
                     "name": c.get("name") or "",
                     "relationship": c.get("relationship") or RELATIONSHIPS[0],
+                    "activity": c.get("activity") or ACTIVITY[1],
                     "tags": c.get("tags") or "",
                     "city": c.get("city") or "",
                     "instagram": c.get("instagram") or "",

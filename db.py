@@ -89,6 +89,13 @@ def update_contact(client: Client, contact_id: int, stage: str, notes: str) -> N
     ).execute()
 
 
+def set_contact_archived(client: Client, contact_id: int, archived: bool) -> None:
+    """Положить карточку в архив (True) или вернуть из архива (False)."""
+    client.table("contacts").update({"archived": archived}).eq(
+        "id", contact_id
+    ).execute()
+
+
 def delete_contact(client: Client, contact_id: int) -> None:
     """Удалить карточку по id."""
     client.table("contacts").delete().eq("id", contact_id).execute()
@@ -139,6 +146,7 @@ def get_weekly_contacts(client: Client, user_email: str) -> dict[str, int]:
         client.table("contacts")
         .select("created_at")
         .eq("user_email", user_email)
+        .eq("archived", False)  # архивные в статистику не идут
         .execute()
         .data
     )
@@ -162,7 +170,7 @@ def get_stage_counts(client: Client, user_email: str | None = None) -> dict:
     - closing:  стадия «закрытие»
     user_email=None — по всем, иначе только по этому человеку.
     """
-    query = client.table("contacts").select("stage")
+    query = client.table("contacts").select("stage").eq("archived", False)
     if user_email is not None:
         query = query.eq("user_email", user_email)
     stages = [r["stage"] for r in query.execute().data]
