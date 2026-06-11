@@ -3,6 +3,8 @@
 Вкладки: «Подходы», «Карточки», «Статистика», «База данных» (мини-CRM).
 """
 
+# redeploy: 2026-06-11 — форс-передеплой Streamlit Cloud (синхронизация app.py/db.py)
+
 from datetime import date
 
 import pandas as pd
