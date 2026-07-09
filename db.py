@@ -181,24 +181,72 @@ def get_stage_counts(client: Client, user_email: str | None = None) -> dict:
     }
 
 
-# --- Мини-CRM: таблица crm_contacts (отдельная от contacts) ---
+# --- Соревнование: баллы за период ---
+
+# Стоимость каждого достижения в баллах (см. вкладку «Соревнование»).
+POINTS = {"approach": 1, "contact": 2, "date": 5, "closing": 8, "brave": 1}
+APPROACH_DAILY_CAP = 10  # потолок баллов за подходы в один день (brave сверх него)
 
 
-def get_crm_contacts(client: Client) -> list[dict]:
-    """Все CRM-контакты (база общая на двоих), новые сверху."""
-    return client.table("crm_contacts").select("*").order("id", desc=True).execute().data
+def get_competition_score(
+    client: Client, user_email: str, date_from: str, date_to: str
+) -> dict:
+    """Баллы человека за период [date_from, date_to] с разбивкой.
 
+    Считается автоматически из данных:
+    - подход = 1 балл (day_logs.approaches), но не более 10 баллов за день;
+    - смелость = 1 балл (day_logs.brave), начисляется сверх потолка;
+    - контакт = 2, свидание = 5, закрытие = 8 (карточки contacts по created_at,
+      архивные не участвуют; стадии накапливаются — закрытие даёт все три).
+    Дни берутся по date, карточки — по дате created_at. Возвращает разбивку
+    по категориям и итог "total".
+    """
+    day_rows = (
+        client.table("day_logs")
+        .select("approaches, brave")
+        .eq("user_email", user_email)
+        .gte("date", date_from)
+        .lte("date", date_to)
+        .execute()
+        .data
+    )
+    approach_points = 0
+    brave_points = 0
+    for r in day_rows:
+        # Потолок применяется к каждому дню отдельно (строка day_logs = один день).
+        approach_points += min((r.get("approaches") or 0) * POINTS["approach"],
+                               APPROACH_DAILY_CAP)
+        brave_points += (r.get("brave") or 0) * POINTS["brave"]
 
-def add_crm_contact(client: Client, user_email: str, fields: dict) -> None:
-    """Добавить CRM-контакт. fields — словарь колонок без user_email."""
-    client.table("crm_contacts").insert({"user_email": user_email, **fields}).execute()
+    card_rows = (
+        client.table("contacts")
+        .select("stage, created_at")
+        .eq("user_email", user_email)
+        .eq("archived", False)
+        .execute()
+        .data
+    )
+    contacts = dates = closings = 0
+    for r in card_rows:
+        created = r.get("created_at")
+        if not created:
+            continue
+        day = datetime.fromisoformat(created.replace("Z", "+00:00")).date().isoformat()
+        if day < date_from or day > date_to:
+            continue
+        stage = r.get("stage")
+        contacts += 1  # любая карточка — это взятый контакт
+        if stage in ("свидание", "закрытие"):
+            dates += 1
+        if stage == "закрытие":
+            closings += 1
 
-
-def update_crm_contact(client: Client, contact_id: int, fields: dict) -> None:
-    """Обновить переданные поля CRM-контакта по id."""
-    client.table("crm_contacts").update(fields).eq("id", contact_id).execute()
-
-
-def delete_crm_contact(client: Client, contact_id: int) -> None:
-    """Удалить CRM-контакт по id."""
-    client.table("crm_contacts").delete().eq("id", contact_id).execute()
+    breakdown = {
+        "approach": approach_points,
+        "contact": contacts * POINTS["contact"],
+        "date": dates * POINTS["date"],
+        "closing": closings * POINTS["closing"],
+        "brave": brave_points,
+    }
+    breakdown["total"] = sum(breakdown.values())
+    return breakdown

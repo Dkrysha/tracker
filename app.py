@@ -1,32 +1,30 @@
 """Трекер прогресса — интерфейс на Streamlit с Supabase.
 
-Вкладки: «Подходы», «Карточки», «Статистика», «База данных» (мини-CRM).
+Вкладки: «Подходы», «Карточки», «Статистика», «Соревнование».
 """
 
 # redeploy: 2026-06-11 — форс-передеплой Streamlit Cloud (синхронизация app.py/db.py)
 
-from datetime import date
+from datetime import date, timedelta
 
 import pandas as pd
 import streamlit as st
 
 from db import (
     add_contact,
-    add_crm_contact,
     delete_contact,
-    delete_crm_contact,
     get_client,
+    get_competition_score,
     get_contacts,
-    get_crm_contacts,
     get_day_log,
     get_day_totals,
     get_stage_counts,
     get_weekly_contacts,
     get_weekly_day_logs,
+    increment_day_log,
     set_contact_archived,
     set_day_log,
     update_contact,
-    update_crm_contact,
 )
 
 st.set_page_config(page_title="Трекер прогресса", page_icon="📈")
@@ -51,8 +49,6 @@ require_password()
 
 SOURCES = ["улица", "соцсети", "сайт"]
 STAGES = ["контакт", "свидание", "закрытие"]
-RELATIONSHIPS = ["дружеские", "романтические", "знакомые", "другое"]
-ACTIVITY = ["низкая", "средняя", "высокая"]
 
 st.title("📈 Трекер прогресса")
 
@@ -62,8 +58,8 @@ user_email = st.selectbox("Кто вносит запись", ["Danylo", "Pavlo"
 
 client = get_client()
 
-tab_today, tab_cards, tab_stats, tab_crm = st.tabs(
-    ["Подходы", "Карточки", "Статистика", "База данных"]
+tab_today, tab_cards, tab_stats, tab_contest = st.tabs(
+    ["Подходы", "Карточки", "Статистика", "Соревнование"]
 )
 
 with tab_today:
@@ -96,6 +92,15 @@ with tab_today:
         on_change=save_day, args=(selected_day, seen_key, appr_key),
     )
     c3.metric("Упущено", missed)
+
+    # Смелость: отдельная кнопка для подходов, что дались тяжело.
+    # Пишем в БД только по нажатию (increment_day_log трогает поле brave).
+    brave = (row or {}).get("brave") or 0
+    b1, b2 = st.columns([1, 2])
+    b1.metric("Смелость", brave)
+    if b2.button("💪 +1 смелость", key=f"brave_{user_email}_{selected_day}"):
+        increment_day_log(client, user_email, selected_day, "brave")
+        st.rerun()
 
     # Сброс дня — с подтверждением, как у удаления карточки.
     st.divider()
@@ -351,184 +356,57 @@ with tab_stats:
     st.caption(f"Ты ({user_email}) vs друг ({friend})")
     st.write(f"Подходы: {vs('approaches')}  ·  Закрытия: {vs('closing')}")
 
-with tab_crm:
-    st.header("База данных")
+with tab_contest:
+    st.header("Соревнование")
+    st.caption(
+        "Danylo против Pavlo. Баллы: подход 1 (не более 10 за день), "
+        "контакт 2, свидание 5, закрытие 8, смелость 1. Считаются автоматически."
+    )
 
-    # --- Форма добавления: пишем в БД только по submit ---
-    with st.form("add_crm", clear_on_submit=True):
-        crm_name = st.text_input("Имя")
-        f1, f2 = st.columns(2)
-        crm_instagram = f1.text_input("Инстаграм")
-        crm_phone = f2.text_input("Телефон")
-        crm_rel = st.selectbox("Тип отношений", RELATIONSHIPS)
-        crm_activity = st.selectbox("Активность", ACTIVITY, index=1)
-        crm_tags = st.text_input("Теги / интересы")
-        crm_city = st.text_input("Город / район")
-        crm_last = st.date_input("Дата последнего контакта", value=date.today())
-        crm_notes = st.text_area("Заметки")
-        crm_submitted = st.form_submit_button("Добавить в базу")
-    if crm_submitted:
-        if crm_name.strip():
-            add_crm_contact(
-                client,
-                user_email,
-                {
-                    "name": crm_name.strip(),
-                    "instagram": crm_instagram.strip(),
-                    "phone": crm_phone.strip(),
-                    "relationship": crm_rel,
-                    "activity": crm_activity,
-                    "tags": crm_tags.strip(),
-                    "city": crm_city.strip(),
-                    "last_contact": crm_last.isoformat(),
-                    "notes": crm_notes,
-                },
+    # Период по умолчанию — текущая неделя (пн–вс).
+    today = date.today()
+    week_start = today - timedelta(days=today.weekday())
+    week_end = week_start + timedelta(days=6)
+
+    p1, p2 = st.columns(2)
+    contest_from = p1.date_input("С", value=week_start, key="contest_from")
+    contest_to = p2.date_input("По", value=week_end, key="contest_to")
+
+    if contest_from > contest_to:
+        st.warning("Дата «с» позже даты «по».")
+    else:
+        scores = {
+            person: get_competition_score(
+                client, person, contest_from.isoformat(), contest_to.isoformat()
             )
-            st.success(f"«{crm_name.strip()}» добавлен(а) в базу")
-            st.rerun()
-        else:
-            st.warning("Имя не может быть пустым")
-
-    st.divider()
-
-    crm_contacts = get_crm_contacts(client)
-
-    # --- Поиск и фильтры ---
-    s1, s2, s3, s4 = st.columns(4)
-    query = s1.text_input("Поиск (имя / теги)").strip().lower()
-    rel_filter = s2.selectbox("Тип отношений", ["все"] + RELATIONSHIPS)
-    activity_filter = s3.selectbox("Активность", ["все"] + ACTIVITY)
-    cities = sorted({c.get("city") for c in crm_contacts if c.get("city")})
-    city_filter = s4.selectbox("Город", ["все"] + cities)
-
-    def matches(c: dict) -> bool:
-        if query and query not in (
-            f"{c.get('name') or ''} {c.get('tags') or ''}".lower()
-        ):
-            return False
-        if rel_filter != "все" and c.get("relationship") != rel_filter:
-            return False
-        if activity_filter != "все" and c.get("activity") != activity_filter:
-            return False
-        if city_filter != "все" and c.get("city") != city_filter:
-            return False
-        return True
-
-    filtered = [c for c in crm_contacts if matches(c)]
-    if not filtered:
-        st.caption("Ничего не найдено.")
-
-    # --- Таблицы-редакторы, сгруппированные по человеку ---
-    # Колонки таблицы (порядок = порядок в data_editor).
-    CRM_COLS = [
-        "name", "relationship", "activity", "tags", "city",
-        "instagram", "phone", "last_contact", "notes",
-    ]
-    CRM_CONFIG = {
-        # Чисто визуальная нумерация: только для чтения, в БД не уходит.
-        "№": st.column_config.NumberColumn("№", disabled=True, width="small"),
-        "name": st.column_config.TextColumn("Имя"),
-        "relationship": st.column_config.SelectboxColumn(
-            "Тип отношений", options=RELATIONSHIPS
-        ),
-        "activity": st.column_config.SelectboxColumn("Активность", options=ACTIVITY),
-        "tags": st.column_config.TextColumn("Теги / интересы"),
-        "city": st.column_config.TextColumn("Город / район"),
-        "instagram": st.column_config.TextColumn("Инстаграм"),
-        "phone": st.column_config.TextColumn("Телефон"),
-        "last_contact": st.column_config.DateColumn("Последний контакт"),
-        "notes": st.column_config.TextColumn("Заметки"),
-    }
-
-    def text_cell(v) -> str:
-        """Ячейку текста приводим к чистой строке ('' для пустых)."""
-        return "" if v is None or pd.isna(v) else str(v).strip()
-
-    def date_cell(v) -> str | None:
-        """Ячейку даты — в ISO-строку или None (учитывая строки из session_state)."""
-        if v is None:
-            return None
-        if isinstance(v, str):
-            return v[:10] or None
-        if pd.isna(v):
-            return None
-        return (v.date() if hasattr(v, "date") else v).isoformat()
-
-    def row_fields(r) -> dict:
-        """Строка таблицы (dict/Series) -> словарь полей для БД."""
-        return {
-            "name": text_cell(r["name"]),
-            "relationship": text_cell(r["relationship"]) or RELATIONSHIPS[0],
-            "activity": text_cell(r["activity"]) or ACTIVITY[1],
-            "tags": text_cell(r["tags"]),
-            "city": text_cell(r["city"]),
-            "instagram": text_cell(r["instagram"]),
-            "phone": text_cell(r["phone"]),
-            "last_contact": date_cell(r["last_contact"]),
-            "notes": text_cell(r["notes"]),
+            for person in ["Danylo", "Pavlo"]
         }
 
-    for person in ["Danylo", "Pavlo"]:
-        person_contacts = [c for c in filtered if c["user_email"] == person]
-        if not person_contacts:
-            continue
-        st.subheader(person)
+        # Крупно: очки обоих рядом.
+        s1, s2 = st.columns(2)
+        s1.metric("Danylo", scores["Danylo"]["total"])
+        s2.metric("Pavlo", scores["Pavlo"]["total"])
 
-        # id остаётся колонкой (нужен, чтобы знать, какую строку трогать),
-        # но прячем его из таблицы через column_order. Индекс — обычный RangeIndex,
-        # поэтому позиции из session_state совпадают с позициями строк ниже.
-        df = pd.DataFrame(
-            [
-                {
-                    "id": c["id"],
-                    "№": i,  # порядковый номер строки (своя нумерация на человека)
-                    "name": c.get("name") or "",
-                    "relationship": c.get("relationship") or RELATIONSHIPS[0],
-                    "activity": c.get("activity") or ACTIVITY[1],
-                    "tags": c.get("tags") or "",
-                    "city": c.get("city") or "",
-                    "instagram": c.get("instagram") or "",
-                    "phone": c.get("phone") or "",
-                    "last_contact": (
-                        date.fromisoformat(c["last_contact"])
-                        if c.get("last_contact")
-                        else None
-                    ),
-                    "notes": c.get("notes") or "",
-                }
-                for i, c in enumerate(person_contacts, start=1)
-            ],
-            columns=["id", "№"] + CRM_COLS,
-        )
+        diff = scores["Danylo"]["total"] - scores["Pavlo"]["total"]
+        if diff > 0:
+            st.success(f"🏆 Ведёт Danylo — на {diff} б.")
+        elif diff < 0:
+            st.success(f"🏆 Ведёт Pavlo — на {-diff} б.")
+        else:
+            st.info("Ничья.")
 
-        editor_key = f"crm_editor_{person}"
-        st.data_editor(
-            df,
-            num_rows="dynamic",  # без этого строки нельзя удалять/добавлять
-            hide_index=True,
-            column_order=["№"] + CRM_COLS,  # id есть в данных, но в таблице не показан
-            column_config=CRM_CONFIG,
-            key=editor_key,
-        )
-
-        if st.button("Сохранить изменения", key=f"crm_save_{person}"):
-            state = st.session_state.get(editor_key, {})
-
-            # Удаления: deleted_rows — список позиций строк в исходном df.
-            for pos in state.get("deleted_rows", []):
-                delete_crm_contact(client, int(df.iloc[pos]["id"]))
-
-            # Правки: edited_rows — {позиция: {колонка: новое_значение}}.
-            for pos, changes in state.get("edited_rows", {}).items():
-                row = df.iloc[int(pos)].to_dict()
-                row.update(changes)
-                update_crm_contact(client, int(df.iloc[int(pos)]["id"]), row_fields(row))
-
-            # Добавления прямо в таблице: added_rows — список словарей.
-            for new_row in state.get("added_rows", []):
-                fields = row_fields({**{col: "" for col in CRM_COLS}, **new_row})
-                if fields["name"]:
-                    add_crm_contact(client, person, fields)
-
-            st.success("Изменения сохранены")
-            st.rerun()
+        # Разбивка под каждым: откуда набраны баллы.
+        st.divider()
+        labels = [
+            ("approach", "Подходы"),
+            ("contact", "Контакты"),
+            ("date", "Свидания"),
+            ("closing", "Закрытия"),
+            ("brave", "Смелость"),
+        ]
+        b1, b2 = st.columns(2)
+        for col, person in zip((b1, b2), ["Danylo", "Pavlo"]):
+            with col:
+                st.markdown(f"**{person}**")
+                for key, label in labels:
+                    st.write(f"{label}: {scores[person][key]}")
